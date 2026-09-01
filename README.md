@@ -82,6 +82,16 @@ In the bar's widget settings (or `omarchy bar set io.github.lewispb.refract <key
   connected. Refract's bridge stays connected while the shell runs, so
   applied colors persist.
 
+## Uninstall
+
+```bash
+omarchy plugin remove io.github.lewispb.refract
+```
+
+Devices return to their onboard lighting on next reconnect or reboot. If
+Refract started the OpenRGB server, it ends with the session; the `openrgb`
+package stays installed (`sudo pacman -R openrgb` removes it).
+
 ## Credits
 
 - [OmaRGB](https://github.com/ilkaydnc/omargb) by Ilkay Dinc set the
