@@ -3,39 +3,32 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "Model.js" as Model
 
-// Bar widget for omarchy-rgb-sync. Shows a row of dots sampled from the
-// gradient the last sync applied, so the bar carries the same colors as the
-// hardware. The tooltip reports the theme, device count, and time of the
-// last run. Left click re-applies the sync.
+// Refract's bar presence: a row of dots sampled from the gradient the
+// current theme produces, dimmed while OpenRGB is unreachable. Left click
+// opens the device panel; right click re-applies the gradient.
 BarWidget {
   id: root
-  moduleName: "io.github.lewispb.rgb-sync"
+  moduleName: "io.github.lewispb.refract"
 
-  property var status: ({})
+  readonly property var service: bar && bar.shell && typeof bar.shell.serviceFor === "function"
+    ? bar.shell.serviceFor(moduleName)
+    : null
 
-  readonly property var gradient: status && status.gradient ? status.gradient : []
-  readonly property int deviceCount: status && status.devices ? status.devices.length : 0
-  readonly property bool ok: status && status.result === "ok"
+  // The shell injects settings into bar widgets, not services; push them
+  // through so the service reads the same entry.
+  onSettingsChanged: if (service && "settings" in service) service.settings = settings
+  onServiceChanged: if (service && "settings" in service) service.settings = settings
 
-  // Up to five dots, sampled evenly across the gradient.
-  readonly property var swatches: {
-    var g = root.gradient
-    if (!g || g.length === 0) return []
-    var count = Math.min(5, g.length)
-    var out = []
-    for (var i = 0; i < count; i++)
-      out.push(g[Math.round(i * (g.length - 1) / Math.max(1, count - 1))])
-    return out
-  }
+  readonly property var anchors2: service ? service.themeAnchors : []
+  readonly property var swatches: Model.gradient(anchors2, 5)
+  readonly property bool connected: service ? service.connected : false
 
   readonly property string tooltip: {
-    if (!status || !status.time) return "rgb-sync has not run yet"
-    var when = String(status.time).replace("T", " ").slice(0, 16)
-    var head = ok
-      ? (status.theme + " on " + deviceCount + " devices at " + when)
-      : (String(status.result) + " at " + when)
-    return head + " — click to re-apply"
+    if (!service) return "Refract"
+    if (!connected) return "OpenRGB unreachable — " + (service.lastError || "waiting for the server")
+    return service.deviceCount + " devices on the theme gradient — click for the panel"
   }
 
   readonly property real dotSize: Math.max(5, Math.round(Style.bar.iconSlot * 0.28))
@@ -45,18 +38,60 @@ BarWidget {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  function parse(raw) {
-    try { root.status = JSON.parse(raw) } catch (e) { root.status = {} }
+  // ---- Panel popout. Shape contract for shell.summon/hide/toggle routing:
+  //      Bar.findPanelWidget requires open/close/opened on the widget root.
+  readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+
+  function open() {
+    if (panelLoader.item) panelLoader.item.open()
   }
 
-  FileView {
-    id: statusFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy-rgb-sync/status.json"
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.parse(text())
-    onFileChanged: reload()
-    onLoadFailed: root.status = {}
+  function close() {
+    if (panelLoader.item) panelLoader.item.close()
+  }
+
+  function togglePanel() {
+    if (panelLoader.item) panelLoader.item.toggle()
+  }
+
+  readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
+
+  function closeForPopoutSwitch() {
+    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
+  }
+
+  function injectPanel() {
+    var target = panelLoader.item
+    if (!target) return
+    if ("bar" in target) target.bar = root.bar
+    if ("settings" in target) target.settings = root.settings
+    if ("anchorItem" in target) target.anchorItem = button
+    if ("hostWidget" in target) target.hostWidget = root
+    if ("service" in target) target.service = root.service
+  }
+
+  onBarChanged: injectPanel()
+
+  Loader {
+    id: panelLoader
+    active: true
+    source: Qt.resolvedUrl("Panel.qml")
+    visible: false
+    onLoaded: {
+      root.injectPanel()
+      Qt.callLater(root.injectPanel)
+    }
+  }
+
+  IpcHandler {
+    target: "io.github.lewispb.refract"
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.togglePanel() }
+    function apply(): void { if (root.service) root.service.applyTheme() }
   }
 
   WidgetButton {
@@ -73,8 +108,11 @@ BarWidget {
       : -1
 
     onPressed: function(b) {
-      if (b === Qt.LeftButton)
-        root.bar.run(Quickshell.env("HOME") + "/.config/omarchy/hooks/theme-set.d/rgb-sync")
+      if (b === Qt.RightButton) {
+        if (root.service) root.service.applyTheme()
+      } else {
+        root.togglePanel()
+      }
     }
 
     Grid {
@@ -93,7 +131,7 @@ BarWidget {
           color: modelData !== "" ? "#" + modelData : "transparent"
           border.width: modelData !== "" ? 0 : 1
           border.color: button.foreground
-          opacity: root.ok || root.swatches.length === 0 ? 1 : 0.4
+          opacity: root.connected ? 1 : 0.35
         }
       }
     }

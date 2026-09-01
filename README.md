@@ -1,133 +1,99 @@
 <p align="center">
-  <img src="assets/logo.svg" width="128" alt="omarchy-rgb-sync logo">
+  <img src="assets/logo.svg" width="128" alt="Refract logo">
 </p>
 
-<h1 align="center">omarchy-rgb-sync</h1>
+<h1 align="center">Refract</h1>
 
 <p align="center">
-  Makes RGB hardware follow the current <a href="https://omarchy.org">Omarchy</a> theme.
+  Multi-color theme sync for RGB hardware, in the <a href="https://omarchy.org">Omarchy</a> bar.
 </p>
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="Bar widget showing the applied gradient colors">
+  <img src="assets/panel.png" width="420" alt="The Refract panel: a gradient strip and every RGB device with its live colors">
 </p>
 
-When you run `omarchy theme set`, every RGB device OpenRGB supports — mice,
-keyboards, DRAM, GPUs, motherboards, Corsair iCUE Link fans and coolers,
-Philips Hue lights — is set to a gradient built from the theme's colors. A
-bar widget shows what was applied.
+Refract builds a gradient from the active Omarchy theme's palette — accent
+through magenta, cyan, and blue by default — and spreads it across every LED
+of every device OpenRGB supports: mice, keyboards, DRAM, GPUs, motherboards,
+Corsair iCUE Link fans and coolers, Philips Hue lights. Switch themes and the
+hardware switches with it, as a spectrum rather than a single color.
 
-## How it works
-
-Four pieces:
-
-- **`rgb-sync`** — a script installed as an Omarchy `theme-set` hook (runs on
-  every theme change) and `post-boot` hook (re-applies colors when the desktop
-  starts). It reads color values from the active theme's `colors.toml`, builds
-  a gradient through them, and applies it with the OpenRGB CLI.
-- **`openrgb-server.service`** — a systemd user service running
-  `openrgb --server`. Some devices, including Logitech wireless mice and
-  Corsair iCUE Link hubs, revert to their onboard lighting profile a moment
-  after host software disconnects. The server stays connected, so applied
-  colors persist.
-- **A bar widget** (`io.github.lewispb.rgb-sync`) — shows dots sampled from
-  the applied gradient in the Omarchy bar. The tooltip reports the theme, device count,
-  and time of the last sync; the dots dim if the last sync failed. Left click
-  re-applies the current theme.
-- **[OpenRGB](https://openrgb.org)** — does the device detection and control.
-  Installed as a dependency.
-
-For each device, the script picks a mode in this order:
-
-1. **direct** — one color per LED; the device shows the gradient.
-2. **custom** — same, for devices that name their per-LED mode "custom".
-3. **static** — a single color; the device shows the first gradient color.
-
-Devices with none of these modes are left unchanged. If a device has more
-LEDs than gradient steps, OpenRGB applies the last color to the remaining
-LEDs.
+Dots in the bar show the gradient the current theme produces. The panel
+behind them lists every device with its colors as the OpenRGB server reports
+them — changes made from the OpenRGB app or another SDK client show up within
+a few seconds — plus a re-apply and a power button per device, and a toggle
+for following the theme.
 
 ## Install
 
 ```bash
-git clone https://github.com/lewispb/omarchy-rgb-sync.git
-cd omarchy-rgb-sync
-./install.sh
+omarchy plugin add https://github.com/lewispb/omarchy-refract.git --enable
 ```
 
-The installer adds the `openrgb` package if missing, enables the user
-service, installs both hooks and the bar widget, and applies the current
-theme's colors.
+That is the whole setup. The widget lands in the bar's right section; move it
+with `omarchy bar move io.github.lewispb.refract --section center`.
 
-The repository doubles as an [Omarchy plugin](https://plugins.omarchy.org/develop.html):
-the widget alone can be installed with
-`omarchy plugin add https://github.com/lewispb/omarchy-rgb-sync --enable`,
-but the widget only displays what the hooks record, so `./install.sh` is the
-complete setup.
+OpenRGB is the one dependency (`sudo pacman -S openrgb`). When the SDK server
+is not running, Refract starts `openrgb --server` itself once per session —
+or connects to one you manage, such as a systemd user service.
 
-## Configure
+## How it works
 
-Optional. Create `~/.config/omarchy/rgb-sync.conf` (shell syntax):
+Three pieces, all inside the plugin:
 
-```bash
-STYLE=gradient                        # "solid" uses one color everywhere
-ANCHORS="accent magenta cyan blue"    # colors.toml keys, in gradient order
-STOPS=24                              # number of gradient steps generated
-```
+- **A service** (`Service.qml`) owns the connection and watches the active
+  theme's `colors.toml`. When the file changes — which is what
+  `omarchy theme set` causes — the gradient is rebuilt from the configured
+  anchor keys and re-applied to every device not switched off.
+- **A Python bridge** (`bridge/openrgb_bridge.py`) speaks the OpenRGB SDK
+  binary protocol over TCP, with no dependency beyond the standard library.
+  It resamples the gradient to each device's exact LED count — an 8-LED mouse
+  and an 84-key keyboard both get the full spectrum — and polls the server so
+  the panel mirrors reality, not just the last command.
+- **A bar widget and panel** show the gradient and the devices, with
+  re-apply, per-device power, and the theme-follow toggle.
 
-`ANCHORS` accepts any keys defined in a theme's `colors.toml`, such as
-`accent`, `red`, `green`, `blue`, `cyan`, `magenta`, `yellow`, `foreground`.
-Keys a theme does not define are skipped. If a theme defines none of them,
-the script falls back to the theme's `keyboard.rgb` file, and exits without
-changing anything if that is also absent.
+## Settings
 
-Re-apply after editing:
+In the bar's widget settings (or `omarchy bar set io.github.lewispb.refract <key> <value>`):
 
-```bash
-~/.config/omarchy/hooks/theme-set.d/rgb-sync
-```
-
-## Monitoring
-
-Every run writes two files under `~/.local/state/omarchy-rgb-sync/`:
-
-- `status.json` — theme, gradient colors, per-device mode assignments, and
-  the result of the last run. The bar widget reads this file and updates
-  whenever it changes.
-- `sync.log` — one line per run, kept to the last 200 lines.
-
-If the bar widget does not appear after install, add it with:
-
-```bash
-omarchy bar put io.github.lewispb.rgb-sync --section right
-```
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `themeSync` | `true` | Re-apply the gradient whenever the theme changes. |
+| `style` | `gradient` | `solid` sends only the first anchor color. |
+| `anchors` | `accent magenta cyan blue` | `colors.toml` keys the gradient passes through, in order. Keys a theme does not define are skipped. |
+| `autoStartServer` | `true` | Start `openrgb --server` once per session if nothing answers. |
+| `host` / `port` | `127.0.0.1` / `6742` | Where the OpenRGB SDK server listens. |
 
 ## Device notes
 
-- **Logitech wireless mice** work through the Lightspeed USB receiver with no
-  extra setup; OpenRGB addresses the mouse's HID++ device directly.
-- **Philips Hue** is supported through OpenRGB's Hue integration, which needs
-  a one-time bridge pairing: stop the server
-  (`systemctl --user stop openrgb-server`), run `openrgb --gui`, add the
-  bridge under Settings → Philips Hue Devices, press the bridge's link button
-  when prompted, close the GUI, and start the server again
-  (`systemctl --user start openrgb-server`). The lights then appear as
-  devices and the sync includes them.
-- **Keyboards with onboard-only modes** (no direct mode) get the static
-  fallback, so they show a single theme color rather than the gradient.
-- **DRAM, motherboard, and GPU control** uses I2C/SMBus. The OpenRGB package
-  installs the udev rules this needs; a reboot after first install helps if
-  those devices are not detected.
-- OpenRGB may log `iCUE LINK ADAPTER has 0 LEDs` for unpopulated hub ports.
-  This is harmless.
+- **Logitech wireless mice** work through the Lightspeed USB receiver;
+  OpenRGB addresses the mouse's HID++ device directly.
+- **Devices without a per-LED mode** are set through their custom mode when
+  the server offers one; a device with neither is left unchanged.
+- **Philips Hue** needs a one-time bridge pairing in the OpenRGB GUI
+  (Settings → Philips Hue Devices, then press the bridge's link button).
+  After that the lights appear as devices like any other.
+- **DRAM, motherboard, and GPU control** uses I2C/SMBus; the OpenRGB package
+  installs the udev rules this needs.
+- Some devices revert to their onboard lighting when no SDK client is
+  connected. Refract's bridge stays connected while the shell runs, so
+  applied colors persist.
 
-## Uninstall
+## Credits
 
-```bash
-./uninstall.sh
-```
-
-Devices return to their onboard lighting on next reconnect or reboot.
+- [OmaRGB](https://github.com/ilkaydnc/omargb) by Ilkay Dinc set the
+  architecture this plugin follows — a shell service owning a Python bridge
+  to the OpenRGB SDK, with the panel mirroring server state instead of only
+  sending to it. Refract exists because OmaRGB syncs one accent color and I
+  wanted the whole palette; if you want per-device mode, brightness, and
+  speed controls or stealth mode, use OmaRGB (running both at once means two
+  clients writing to the same devices).
+- [OpenRGB](https://openrgb.org) does the actual device support — hundreds of
+  controllers behind one SDK.
+- [Omarchy](https://omarchy.org)'s plugin system hosts the whole thing:
+  service, widget, and panel run inside the shell with no extra process
+  beyond the bridge.
 
 ## License
 

@@ -1,22 +1,77 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.lewispb.rgb-sync",
-  "name": "RGB Sync",
+  "id": "io.github.lewispb.refract",
+  "name": "Refract",
   "version": "1.0.0",
   "author": "Lewis Buckley",
   "license": "MIT",
-  "description": "Shows the colors omarchy-rgb-sync last applied to RGB devices.",
+  "description": "Multi-color theme sync for RGB hardware. Builds a gradient from the active Omarchy theme's palette and spreads it across every LED of every device OpenRGB sees, with live state in the bar.",
   "kinds": [
+    "service",
     "bar-widget"
   ],
   "entryPoints": {
+    "service": "Service.qml",
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "RGB Sync",
-    "description": "Color swatches from the last RGB sync. Left click re-applies the current theme; the tooltip shows what was applied, where, and when.",
+    "displayName": "Refract",
+    "description": "Theme-palette gradients across your RGB devices, per LED. Dots in the bar show the live gradient; the panel lists every device with its colors, and lets you re-apply, exclude, or switch devices off.",
     "category": "System",
     "allowMultiple": false,
-    "defaultSection": "right"
+    "defaultSection": "right",
+    "defaults": {
+      "themeSync": true,
+      "style": "gradient",
+      "anchors": "accent magenta cyan blue",
+      "autoStartServer": true,
+      "host": "127.0.0.1",
+      "port": 6742
+    },
+    "schema": [
+      {
+        "key": "themeSync",
+        "type": "boolean",
+        "label": "Follow the theme",
+        "description": "Re-apply the gradient whenever the Omarchy theme changes.",
+        "defaultValue": true
+      },
+      {
+        "key": "style",
+        "type": "string",
+        "label": "Style",
+        "description": "\"gradient\" interpolates through the anchor colors across each device's LEDs; \"solid\" sends only the first anchor.",
+        "defaultValue": "gradient"
+      },
+      {
+        "key": "anchors",
+        "type": "string",
+        "label": "Anchor colors",
+        "description": "colors.toml keys the gradient passes through, in order. Keys a theme does not define are skipped.",
+        "defaultValue": "accent magenta cyan blue"
+      },
+      {
+        "key": "autoStartServer",
+        "type": "boolean",
+        "label": "Start the OpenRGB server when none is running",
+        "description": "Launches `openrgb --server` once per session if nothing answers on the SDK port.",
+        "defaultValue": true
+      },
+      {
+        "key": "host",
+        "type": "string",
+        "label": "OpenRGB SDK host",
+        "defaultValue": "127.0.0.1"
+      },
+      {
+        "key": "port",
+        "type": "integer",
+        "label": "OpenRGB SDK port",
+        "min": 1,
+        "max": 65535,
+        "step": 1,
+        "defaultValue": 6742
+      }
+    ]
   }
 }
