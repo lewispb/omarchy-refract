@@ -1,0 +1,95 @@
+#!/bin/bash
+# rgb-sync: set every RGB device to colors taken from the current Omarchy theme.
+#
+# Reads color values from the active theme's colors.toml, builds a gradient
+# through them, and applies it across each device's LEDs with OpenRGB. Colors
+# are sent to the openrgb-server user service. The server must stay running:
+# Logitech mice and Corsair iCUE Link devices revert to their onboard lighting
+# profile when no host software is connected.
+#
+# Installed as an Omarchy theme-set hook (runs on theme change) and a
+# post-boot hook (re-applies colors when the desktop starts).
+#
+# Configuration (optional): ~/.config/omarchy/rgb-sync.conf, shell syntax.
+#   STYLE=gradient    # or "solid" for a single accent color everywhere
+#   ANCHORS="accent magenta cyan blue"   # colors.toml keys, in gradient order
+#   STOPS=24          # number of gradient steps generated
+
+CONF="$HOME/.config/omarchy/rgb-sync.conf"
+[[ -f $CONF ]] && source "$CONF"
+STYLE=${STYLE:-gradient}
+ANCHORS=${ANCHORS:-accent magenta cyan blue}
+STOPS=${STOPS:-24}
+
+COLORS_TOML="$HOME/.local/state/omarchy/current/theme/colors.toml"
+KEYBOARD_RGB="$HOME/.local/state/omarchy/current/theme/keyboard.rgb"
+
+theme_color() {
+  grep -m1 "^$1[[:space:]]*=" "$COLORS_TOML" 2>/dev/null |
+    sed -En 's/.*"#?([0-9a-fA-F]{6})".*/\1/p'
+}
+
+# Interpolate between two hex colors; t ranges from 0 to 1000.
+lerp_hex() {
+  local a=$1 b=$2 t=$3
+  printf '%02X%02X%02X' \
+    $((16#${a:0:2} + (16#${b:0:2} - 16#${a:0:2}) * t / 1000)) \
+    $((16#${a:2:2} + (16#${b:2:2} - 16#${a:2:2}) * t / 1000)) \
+    $((16#${a:4:2} + (16#${b:4:2} - 16#${a:4:2}) * t / 1000))
+}
+
+# Collect anchor colors that exist in this theme.
+anchors=()
+for key in $ANCHORS; do
+  hex=$(theme_color "$key")
+  [[ $hex =~ ^[0-9a-fA-F]{6}$ ]] && anchors+=("$hex")
+done
+if [[ ${#anchors[@]} -eq 0 && -f $KEYBOARD_RGB ]]; then
+  hex=$(tr -d ' \n#' <"$KEYBOARD_RGB")
+  [[ $hex =~ ^[0-9a-fA-F]{6}$ ]] && anchors=("$hex")
+fi
+[[ ${#anchors[@]} -eq 0 ]] && exit 0
+
+solid=${anchors[0]}
+
+# Build the comma-separated gradient list.
+if [[ $STYLE == solid || ${#anchors[@]} -eq 1 ]]; then
+  gradient=$solid
+else
+  segs=$((${#anchors[@]} - 1))
+  stops=()
+  for ((i = 0; i < STOPS; i++)); do
+    pos=$((i * segs * 1000 / (STOPS - 1)))
+    seg=$((pos / 1000))
+    ((seg >= segs)) && seg=$((segs - 1))
+    stops+=("$(lerp_hex "${anchors[seg]}" "${anchors[seg + 1]}" $((pos - seg * 1000)))")
+  done
+  gradient=$(IFS=,; echo "${stops[*]}")
+fi
+
+# Wait for the server after login (post-boot can run before it is up).
+for _ in $(seq 1 15); do
+  systemctl --user is-active --quiet openrgb-server && break
+  sleep 1
+done
+
+# Pick the best mode per device. Direct and custom modes take one color per
+# LED, so they get the gradient; OpenRGB applies the last color to any LEDs
+# beyond the list. Static modes take a single color, so they get the first
+# anchor. Devices with none of these modes are left unchanged.
+args=()
+while IFS=$'\t' read -r idx modes; do
+  if [[ $modes == *direct* ]]; then
+    args+=(-d "$idx" -m direct -c "$gradient")
+  elif [[ $modes == *custom* ]]; then
+    args+=(-d "$idx" -m custom -c "$gradient")
+  elif [[ $modes == *static* ]]; then
+    args+=(-d "$idx" -m static -c "$solid")
+  fi
+done < <(openrgb --list-devices 2>/dev/null | awk '
+  /^[0-9]+: / { idx = $1; sub(":", "", idx) }
+  /^  Modes:/ { printf "%s\t%s\n", idx, tolower($0) }
+')
+
+[[ ${#args[@]} -gt 0 ]] && openrgb "${args[@]}" >/dev/null 2>&1
+exit 0

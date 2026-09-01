@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenRGB server (keeps RGB devices under host control so applied colors persist)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/openrgb --server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
