@@ -45,6 +45,7 @@ Item {
   readonly property bool themeSync: setting("themeSync", true) !== false
   readonly property string style: String(setting("style", "gradient")) === "solid" ? "solid" : "gradient"
   readonly property string anchorKeys: String(setting("anchors", "accent magenta cyan blue"))
+  readonly property bool vivid: setting("vivid", true) !== false
 
   // Devices switched off from the panel, by name: { "<device name>": true }.
   // The panel owns writing this; theme sync leaves these dark.
@@ -170,17 +171,18 @@ Item {
   onThemeAnchorsChanged: scheduleApply()
   onThemeSyncChanged: if (themeSync) scheduleApply()
   onStyleChanged: scheduleApply()
+  onVividChanged: scheduleApply()
 
   function applyTheme() {
     if (!connected || themeAnchors.length === 0) return
     var exclude = []
     for (var name in offDevices) if (offDevices[name]) exclude.push(name)
-    send({ op: "apply", anchors: themeAnchors, style: style, exclude: exclude })
+    send({ op: "apply", anchors: themeAnchors, style: style, vivid: vivid, exclude: exclude })
   }
 
   function applyDevice(index) {
     if (!connected || themeAnchors.length === 0) return
-    send({ op: "apply", anchors: themeAnchors, style: style, device: index })
+    send({ op: "apply", anchors: themeAnchors, style: style, vivid: vivid, device: index })
   }
 
   function deviceOff(index) {

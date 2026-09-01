@@ -26,7 +26,8 @@
       "anchors": "accent magenta cyan blue",
       "autoStartServer": true,
       "host": "127.0.0.1",
-      "port": 6742
+      "port": 6742,
+      "vivid": true
     },
     "schema": [
       {
@@ -42,6 +43,13 @@
         "label": "Style",
         "description": "\"gradient\" interpolates through the anchor colors across each device's LEDs; \"solid\" sends only the first anchor.",
         "defaultValue": "gradient"
+      },
+      {
+        "key": "vivid",
+        "type": "boolean",
+        "label": "Vivid colors on devices",
+        "description": "LEDs render mid-saturation colors as washed out, so hardware colors are sent with lifted saturation. Turn off to send the exact theme colors.",
+        "defaultValue": true
       },
       {
         "key": "anchors",

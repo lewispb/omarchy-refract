@@ -24,6 +24,7 @@ Events:
 Only the Python standard library is used.
 """
 
+import colorsys
 import json
 import select
 import shutil
@@ -157,6 +158,17 @@ def parse_controller(data, protocol):
     dev["leds"] = num_leds
     dev["colors"] = colors
     return dev
+
+
+# LEDs render mid-saturation screen colors as washed out, so hardware-bound
+# colors get their saturation and value lifted. Screen surfaces (the panel,
+# the bar) keep the exact theme colors.
+def vivid(hexc):
+    h, s, v = colorsys.rgb_to_hsv(int(hexc[0:2], 16) / 255,
+                                  int(hexc[2:4], 16) / 255,
+                                  int(hexc[4:6], 16) / 255)
+    r, g, b = colorsys.hsv_to_rgb(h, min(1.0, s * 1.45), min(1.0, v * 1.1))
+    return "%02X%02X%02X" % (round(r * 255), round(g * 255), round(b * 255))
 
 
 def lerp_hex(a, b, t):
@@ -332,6 +344,8 @@ class Bridge:
             return
         if msg.get("style") == "solid":
             anchors = anchors[:1]
+        if msg.get("vivid", True):
+            anchors = [vivid(a) for a in anchors]
         exclude = set(msg.get("exclude", []))
         only = msg.get("device", None)
         if not self.sock:
@@ -345,7 +359,11 @@ class Bridge:
                     continue
                 if d["leds"] == 0:
                     continue
-                self.update_leds(d["index"], gradient(anchors, d["leds"]))
+                # A device with few LEDs gets the first two anchors rather
+                # than the whole palette: four diodes showing four hues reads
+                # as noise, not a gradient.
+                use = anchors if d["leds"] >= 10 else anchors[:2]
+                self.update_leds(d["index"], gradient(use, d["leds"]))
             result("apply", True)
             self.refresh()
         except (OSError, ConnectionError) as e:

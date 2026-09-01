@@ -47,8 +47,9 @@ Three pieces, all inside the plugin:
   anchor keys and re-applied to every device not switched off.
 - **A Python bridge** (`bridge/openrgb_bridge.py`) speaks the OpenRGB SDK
   binary protocol over TCP, with no dependency beyond the standard library.
-  It resamples the gradient to each device's exact LED count — an 8-LED mouse
-  and an 84-key keyboard both get the full spectrum — and polls the server so
+  It resamples the gradient to each device's exact LED count — a device with
+  ten or more LEDs gets the full spectrum, a smaller one a blend of the first
+  two anchors, since four diodes showing four hues reads as noise — and polls the server so
   the panel mirrors reality, not just the last command.
 - **A bar widget and panel** show the gradient and the devices, with
   re-apply, per-device power, and the theme-follow toggle.
@@ -61,6 +62,7 @@ In the bar's widget settings (or `omarchy bar set io.github.lewispb.refract <key
 |-----|---------|---------|
 | `themeSync` | `true` | Re-apply the gradient whenever the theme changes. |
 | `style` | `gradient` | `solid` sends only the first anchor color. |
+| `vivid` | `true` | LEDs render mid-saturation colors as washed out, so hardware colors are sent with lifted saturation and brightness. Turn off to send the exact theme colors. |
 | `anchors` | `accent magenta cyan blue` | `colors.toml` keys the gradient passes through, in order. Keys a theme does not define are skipped. |
 | `autoStartServer` | `true` | Start `openrgb --server` once per session if nothing answers. |
 | `host` / `port` | `127.0.0.1` / `6742` | Where the OpenRGB SDK server listens. |
