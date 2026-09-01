@@ -10,6 +10,9 @@
 # Installed as an Omarchy theme-set hook (runs on theme change) and a
 # post-boot hook (re-applies colors when the desktop starts).
 #
+# Each run writes ~/.local/state/omarchy-rgb-sync/status.json and appends to
+# sync.log in the same directory. The bundled bar widget reads status.json.
+#
 # Configuration (optional): ~/.config/omarchy/rgb-sync.conf, shell syntax.
 #   STYLE=gradient    # or "solid" for a single accent color everywhere
 #   ANCHORS="accent magenta cyan blue"   # colors.toml keys, in gradient order
@@ -21,8 +24,37 @@ STYLE=${STYLE:-gradient}
 ANCHORS=${ANCHORS:-accent magenta cyan blue}
 STOPS=${STOPS:-24}
 
-COLORS_TOML="$HOME/.local/state/omarchy/current/theme/colors.toml"
-KEYBOARD_RGB="$HOME/.local/state/omarchy/current/theme/keyboard.rgb"
+THEME_DIR="$HOME/.local/state/omarchy/current/theme"
+COLORS_TOML="$THEME_DIR/colors.toml"
+KEYBOARD_RGB="$THEME_DIR/keyboard.rgb"
+STATE_DIR="$HOME/.local/state/omarchy-rgb-sync"
+mkdir -p "$STATE_DIR"
+
+# theme-set hooks receive the theme slug as $1; post-boot runs get nothing,
+# so fall back to asking omarchy.
+theme_name=${1:-$(omarchy theme current 2>/dev/null)}
+
+log() {
+  echo "$(date -Is) $*" >>"$STATE_DIR/sync.log"
+  tail -n 200 "$STATE_DIR/sync.log" >"$STATE_DIR/sync.log.tmp" &&
+    mv "$STATE_DIR/sync.log.tmp" "$STATE_DIR/sync.log"
+}
+
+# Writes status.json for the bar widget. Args: result message.
+write_status() {
+  local result=$1
+  {
+    printf '{\n'
+    printf '  "time": "%s",\n' "$(date -Is)"
+    printf '  "theme": "%s",\n' "$theme_name"
+    printf '  "style": "%s",\n' "$STYLE"
+    printf '  "result": "%s",\n' "$result"
+    printf '  "gradient": [%s],\n' "$(sed -E 's/([0-9A-Fa-f]{6})/"\1"/g' <<<"$gradient")"
+    printf '  "devices": [%s]\n' "$devices_json"
+    printf '}\n'
+  } >"$STATE_DIR/status.json.tmp"
+  mv "$STATE_DIR/status.json.tmp" "$STATE_DIR/status.json"
+}
 
 theme_color() {
   grep -m1 "^$1[[:space:]]*=" "$COLORS_TOML" 2>/dev/null |
@@ -48,7 +80,12 @@ if [[ ${#anchors[@]} -eq 0 && -f $KEYBOARD_RGB ]]; then
   hex=$(tr -d ' \n#' <"$KEYBOARD_RGB")
   [[ $hex =~ ^[0-9a-fA-F]{6}$ ]] && anchors=("$hex")
 fi
-[[ ${#anchors[@]} -eq 0 ]] && exit 0
+gradient="" devices_json=""
+if [[ ${#anchors[@]} -eq 0 ]]; then
+  log "skip: theme '$theme_name' defines no usable colors"
+  write_status "skipped: no usable theme colors"
+  exit 0
+fi
 
 solid=${anchors[0]}
 
@@ -72,24 +109,49 @@ for _ in $(seq 1 15); do
   systemctl --user is-active --quiet openrgb-server && break
   sleep 1
 done
+if ! systemctl --user is-active --quiet openrgb-server; then
+  log "error: openrgb-server is not active"
+  write_status "error: openrgb-server not active"
+  exit 0
+fi
 
 # Pick the best mode per device. Direct and custom modes take one color per
 # LED, so they get the gradient; OpenRGB applies the last color to any LEDs
 # beyond the list. Static modes take a single color, so they get the first
 # anchor. Devices with none of these modes are left unchanged.
 args=()
-while IFS=$'\t' read -r idx modes; do
+while IFS=$'\t' read -r idx name modes; do
+  mode=""
   if [[ $modes == *direct* ]]; then
+    mode=direct
     args+=(-d "$idx" -m direct -c "$gradient")
   elif [[ $modes == *custom* ]]; then
+    mode=custom
     args+=(-d "$idx" -m custom -c "$gradient")
   elif [[ $modes == *static* ]]; then
+    mode=static
     args+=(-d "$idx" -m static -c "$solid")
   fi
+  [[ -z $mode ]] && continue
+  name=${name//\\/\\\\}
+  name=${name//\"/\\\"}
+  devices_json+="${devices_json:+, }{\"index\": $idx, \"name\": \"$name\", \"mode\": \"$mode\"}"
 done < <(openrgb --list-devices 2>/dev/null | awk '
-  /^[0-9]+: / { idx = $1; sub(":", "", idx) }
-  /^  Modes:/ { printf "%s\t%s\n", idx, tolower($0) }
+  /^[0-9]+: / { idx = $1; sub(":", "", idx); name = $0; sub(/^[0-9]+: /, "", name) }
+  /^  Modes:/ { printf "%s\t%s\t%s\n", idx, name, tolower($0) }
 ')
 
-[[ ${#args[@]} -gt 0 ]] && openrgb "${args[@]}" >/dev/null 2>&1
+if [[ ${#args[@]} -eq 0 ]]; then
+  log "error: no controllable devices found (theme '$theme_name')"
+  write_status "error: no devices found"
+  exit 0
+fi
+
+if openrgb "${args[@]}" >/dev/null 2>&1; then
+  log "applied theme '$theme_name' ($STYLE, ${#anchors[@]} anchors) to $(grep -o '"index"' <<<"$devices_json" | wc -l) devices"
+  write_status "ok"
+else
+  log "error: openrgb exited non-zero (theme '$theme_name')"
+  write_status "error: openrgb failed"
+fi
 exit 0

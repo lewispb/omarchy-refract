@@ -14,6 +14,14 @@ systemctl --user enable --now openrgb-server.service
 omarchy hook install theme-set rgb-sync
 omarchy hook install post-boot rgb-sync
 
+# Bar widget showing what the sync last applied.
+PLUGIN_ID="io.github.lewispb.rgb-sync"
+mkdir -p "$HOME/.config/omarchy/plugins/$PLUGIN_ID"
+cp manifest.json BarWidget.qml README.md LICENSE "$HOME/.config/omarchy/plugins/$PLUGIN_ID/"
+omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+omarchy bar put "$PLUGIN_ID" --section right 2>/dev/null ||
+  echo "Add the widget with: omarchy bar put $PLUGIN_ID --section right"
+
 # Give the server time to detect devices on a first start, then apply the
 # current theme's colors.
 sleep 5

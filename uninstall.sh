@@ -4,6 +4,10 @@ set -euo pipefail
 rm -f "$HOME/.config/omarchy/hooks/theme-set.d/rgb-sync"
 rm -f "$HOME/.config/omarchy/hooks/post-boot.d/rgb-sync"
 
+rm -rf "$HOME/.config/omarchy/plugins/io.github.lewispb.rgb-sync"
+omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+rm -rf "$HOME/.local/state/omarchy-rgb-sync"
+
 systemctl --user disable --now openrgb-server.service 2>/dev/null || true
 rm -f "$HOME/.config/systemd/user/openrgb-server.service"
 systemctl --user daemon-reload
