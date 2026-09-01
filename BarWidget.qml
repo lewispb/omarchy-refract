@@ -31,8 +31,8 @@ BarWidget {
     return service.deviceCount + " devices on the theme gradient — click for the panel"
   }
 
-  readonly property real dotSize: Math.max(5, Math.round(Style.bar.iconSlot * 0.28))
-  readonly property real dotSpacing: Math.max(3, Math.round(dotSize * 0.55))
+  readonly property real dotSize: Math.max(4, Math.round(Style.bar.iconSlot * 0.2))
+  readonly property real dotSpacing: Math.max(2, Math.round(dotSize * 0.45))
   readonly property int dotCount: Math.max(1, swatches.length)
 
   implicitWidth: button.implicitWidth
@@ -102,9 +102,9 @@ BarWidget {
     tooltipText: root.tooltip
     fixedWidth: root.vertical
       ? -1
-      : root.dotCount * root.dotSize + (root.dotCount - 1) * root.dotSpacing + 17.5
+      : root.dotCount * root.dotSize + (root.dotCount - 1) * root.dotSpacing + 14
     fixedHeight: root.vertical
-      ? root.dotCount * root.dotSize + (root.dotCount - 1) * root.dotSpacing + 17.5
+      ? root.dotCount * root.dotSize + (root.dotCount - 1) * root.dotSpacing + 14
       : -1
 
     onPressed: function(b) {
