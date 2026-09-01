@@ -22,7 +22,7 @@ BarWidget {
   onServiceChanged: if (service && "settings" in service) service.settings = settings
 
   readonly property var anchors2: service ? service.themeAnchors : []
-  readonly property var swatches: Model.gradient(anchors2, 5)
+  readonly property var ringColors: Model.gradient(anchors2, 8)
   readonly property bool connected: service ? service.connected : false
 
   readonly property string tooltip: {
@@ -31,9 +31,12 @@ BarWidget {
     return service.deviceCount + " devices on the theme gradient — click for the panel"
   }
 
-  readonly property real dotSize: Math.max(4, Math.round(Style.bar.iconSlot * 0.2))
-  readonly property real dotSpacing: Math.max(2, Math.round(dotSize * 0.45))
-  readonly property int dotCount: Math.max(1, swatches.length)
+  // The logo's mark at bar scale: eight dots on a ring, colored along the
+  // gradient, with the first anchor at the center. Sized like the other
+  // icon glyphs (see TailscaleIcon).
+  readonly property real ringSize: Style.font.icon
+  readonly property real ringDot: Math.max(2.5, ringSize * 0.26)
+  readonly property real centerDot: Math.max(3, ringSize * 0.34)
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -100,12 +103,8 @@ BarWidget {
     bar: root.bar
     hasVisualContent: true
     tooltipText: root.tooltip
-    fixedWidth: root.vertical
-      ? -1
-      : root.dotCount * root.dotSize + (root.dotCount - 1) * root.dotSpacing + 14
-    fixedHeight: root.vertical
-      ? root.dotCount * root.dotSize + (root.dotCount - 1) * root.dotSpacing + 14
-      : -1
+    fixedWidth: root.vertical ? -1 : root.ringSize + 14
+    fixedHeight: root.vertical ? Style.bar.iconSlot : -1
 
     onPressed: function(b) {
       if (b === Qt.RightButton) {
@@ -115,24 +114,47 @@ BarWidget {
       }
     }
 
-    Grid {
+    Item {
+      id: ring
+      width: root.ringSize
+      height: root.ringSize
       anchors.centerIn: parent
-      columns: root.vertical ? 1 : root.dotCount
-      spacing: root.dotSpacing
+      opacity: root.connected ? 1 : 0.35
+
+      // No palette yet: the ring outline alone, in the bar foreground.
+      Rectangle {
+        visible: root.ringColors.length === 0
+        anchors.fill: parent
+        radius: width / 2
+        color: "transparent"
+        border.width: 1
+        border.color: button.foreground
+      }
 
       Repeater {
-        model: root.swatches.length > 0 ? root.swatches : [""]
+        model: root.ringColors
 
         Rectangle {
           required property string modelData
-          width: root.dotSize
-          height: root.dotSize
-          radius: root.dotSize / 2
-          color: modelData !== "" ? "#" + modelData : "transparent"
-          border.width: modelData !== "" ? 0 : 1
-          border.color: button.foreground
-          opacity: root.connected ? 1 : 0.35
+          required property int index
+          readonly property real angle: index * Math.PI / 4 - Math.PI / 2
+          readonly property real orbit: (ring.width - width) / 2
+          x: orbit + Math.cos(angle) * orbit
+          y: orbit + Math.sin(angle) * orbit
+          width: root.ringDot
+          height: root.ringDot
+          radius: width / 2
+          color: "#" + modelData
         }
+      }
+
+      Rectangle {
+        visible: root.ringColors.length > 0
+        anchors.centerIn: parent
+        width: root.centerDot
+        height: root.centerDot
+        radius: width / 2
+        color: root.ringColors.length > 0 ? "#" + root.ringColors[0] : "transparent"
       }
     }
   }

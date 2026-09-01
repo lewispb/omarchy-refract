@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import qs.Commons
 import "Model.js" as Model
 
 // Headless owner of the OpenRGB connection and the theme watcher. The shell
@@ -58,12 +59,30 @@ Item {
   readonly property string bridgePath: Qt.resolvedUrl("bridge/openrgb_bridge.py").toString().replace(/^file:\/\//, "")
 
   FileView {
+    id: colorsFile
     path: Quickshell.env("HOME") + "/.local/state/omarchy/current/theme/colors.toml"
     watchChanges: true
     printErrors: false
     onLoaded: root.colorsToml = text()
     onFileChanged: reload()
     onLoadFailed: root.colorsToml = ""
+  }
+
+  // The shell never re-reads colors.toml on a theme switch — omarchy-theme-set
+  // pushes the new colors over shell IPC — and the switch swaps the staged
+  // theme directory, which replaces the file's inode and silences the file
+  // watch above after the first switch. The Color singleton's properties do
+  // change on every switch, so they are the reload trigger; the file itself
+  // still carries the full palette the gradient needs.
+  readonly property string themeSignature: String(Color.accent) + String(Color.background) + String(Color.foreground)
+  onThemeSignatureChanged: themeReloadTimer.restart()
+
+  // Delayed so the reload reads the new theme's file after the staging swap
+  // finishes, not the moment the first IPC-pushed color lands.
+  Timer {
+    id: themeReloadTimer
+    interval: 500
+    onTriggered: colorsFile.reload()
   }
 
   // ---- Bridge I/O
