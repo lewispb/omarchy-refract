@@ -39,6 +39,14 @@ import urllib.request
 
 from palette import gradient, hex_to_xy, rotate, spread, xy_to_hex
 
+# The bridge is on the local network and its address can be a setting, so
+# what it sends is bounded before it is parsed or listed.
+MAX_BODY_BYTES = 4 << 20
+MAX_LIGHTS = 256
+MAX_GROUPS = 256
+MAX_GRADIENT_POINTS = 32
+MAX_NAME_CHARS = 128
+
 POLL_SECONDS = 3.0
 PAIR_SECONDS = 3.0
 DISCOVER_SECONDS = 30.0
@@ -143,9 +151,11 @@ class Api:
         try:
             conn.request(method, path, body=data, headers=headers)
             resp = conn.getresponse()
-            raw = resp.read()
+            raw = resp.read(MAX_BODY_BYTES + 1)
         finally:
             conn.close()
+        if len(raw) > MAX_BODY_BYTES:
+            raise HueError("reply larger than %d bytes" % MAX_BODY_BYTES)
         try:
             parsed = json.loads(raw.decode("utf-8", "replace")) if raw else None
         except ValueError:
@@ -161,15 +171,19 @@ class Api:
     def pair(self):
         """The application key, or None while the link button is unpressed."""
         status, parsed = self.request("POST", "/api", {"devicetype": DEVICE_TYPE, "generateclientkey": True})
-        if not isinstance(parsed, list) or not parsed:
+        if not isinstance(parsed, list) or not parsed or not isinstance(parsed[0], dict):
             raise HueError("unexpected pairing reply (HTTP %s)" % status)
         entry = parsed[0]
-        if "success" in entry:
-            return entry["success"].get("username")
-        error = entry.get("error", {})
+        success = entry.get("success")
+        if isinstance(success, dict):
+            key = success.get("username")
+            if isinstance(key, str) and 0 < len(key) <= MAX_NAME_CHARS:
+                return key
+            raise HueError("pairing reply carried no usable key")
+        error = entry.get("error") if isinstance(entry.get("error"), dict) else {}
         if error.get("type") == 101:
             return None
-        raise HueError(error.get("description") or "pairing failed")
+        raise HueError(str(error.get("description") or "pairing failed")[:MAX_NAME_CHARS])
 
     def resource(self, kind):
         status, parsed = self.request("GET", "/clip/v2/resource/" + kind)
@@ -461,32 +475,41 @@ class Hue(threading.Thread):
 
     def poll(self):
         data = self.api.resource("light")
+        if not isinstance(data, list):
+            raise HueError("light list is not a list")
         lights = []
         owners = set()
         for entry in data:
-            if not isinstance(entry, dict) or "color" not in entry:
+            if not isinstance(entry, dict) or not isinstance(entry.get("color"), dict):
                 continue
-            xy = entry.get("color", {}).get("xy")
-            grad = entry.get("gradient") or {}
-            points = int(grad.get("points_capable") or 0)
+            if len(lights) >= MAX_LIGHTS:
+                break
+            xy = entry["color"].get("xy")
+            grad = entry.get("gradient") if isinstance(entry.get("gradient"), dict) else {}
+            points = min(MAX_GRADIENT_POINTS, self.as_int(grad.get("points_capable")))
             owner = (entry.get("owner") or {}).get("rid", "")
             owners.add(owner)
+            light_id = entry.get("id")
+            if not isinstance(light_id, str) or not light_id:
+                continue
+            gradient_points = [p for p in (grad.get("points") or []) if self.has_xy(p)][:MAX_GRADIENT_POINTS]
             lights.append({
-                "id": entry.get("id", ""),
+                "id": light_id[:MAX_NAME_CHARS],
                 "order": self.order_of(entry.get("id_v1", "")),
-                "name": (entry.get("metadata") or {}).get("name") or "Hue light",
+                "name": self.text((entry.get("metadata") or {}).get("name"), "Hue light"),
                 "on": bool((entry.get("on") or {}).get("on")),
-                "xy": (xy["x"], xy["y"]) if isinstance(xy, dict) else None,
-                "gradient": [(p["color"]["xy"]["x"], p["color"]["xy"]["y"])
-                             for p in grad.get("points", []) if self.has_xy(p)],
+                "xy": (xy["x"], xy["y"]) if self.is_xy(xy) else None,
+                "gradient": [(p["color"]["xy"]["x"], p["color"]["xy"]["y"]) for p in gradient_points],
                 "points": points,
                 "owner": owner,
                 "product": "",
             })
         if owners - set(self.products):
-            for dev in self.api.resource("device"):
-                if isinstance(dev, dict):
-                    self.products[dev.get("id", "")] = (dev.get("product_data") or {}).get("product_name", "")
+            devices = self.api.resource("device")
+            for dev in devices if isinstance(devices, list) else []:
+                if isinstance(dev, dict) and isinstance(dev.get("id"), str):
+                    product = (dev.get("product_data") or {}).get("product_name")
+                    self.products[dev["id"]] = self.text(product, "")
         for light in lights:
             light["product"] = self.products.get(light["owner"], "")
         lights.sort(key=lambda l: (l["order"], l["name"]))
@@ -520,14 +543,16 @@ class Hue(threading.Thread):
             return
         groups = []
         for kind in ("room", "zone"):
-            for entry in self.api.resource(kind):
-                if not isinstance(entry, dict):
+            entries = self.api.resource(kind)
+            for entry in entries if isinstance(entries, list) else []:
+                if not isinstance(entry, dict) or len(groups) >= MAX_GROUPS:
                     continue
-                children = [c for c in entry.get("children", []) if isinstance(c, dict)]
+                children = entry.get("children") if isinstance(entry.get("children"), list) else []
+                children = [c for c in children if isinstance(c, dict) and isinstance(c.get("rid"), str)]
                 groups.append({
-                    "name": (entry.get("metadata") or {}).get("name") or "",
-                    "devices": {c.get("rid") for c in children if c.get("rtype") == "device"},
-                    "lights": {c.get("rid") for c in children if c.get("rtype") == "light"},
+                    "name": self.text((entry.get("metadata") or {}).get("name"), ""),
+                    "devices": {c["rid"] for c in children if c.get("rtype") == "device"},
+                    "lights": {c["rid"] for c in children if c.get("rtype") == "light"},
                 })
         with self.lock:
             self.groups = groups
@@ -544,11 +569,25 @@ class Hue(threading.Thread):
         return None
 
     @staticmethod
-    def has_xy(point):
+    def text(value, fallback):
+        """A bounded display string from an untrusted JSON value."""
+        return value[:MAX_NAME_CHARS] if isinstance(value, str) and value else fallback
+
+    @staticmethod
+    def as_int(value):
+        return int(value) if isinstance(value, (int, float)) and 0 <= value < 1 << 16 else 0
+
+    @staticmethod
+    def is_xy(xy):
+        return (isinstance(xy, dict)
+                and isinstance(xy.get("x"), (int, float)) and isinstance(xy.get("y"), (int, float))
+                and 0 <= xy["x"] <= 1 and 0 <= xy["y"] <= 1)
+
+    @classmethod
+    def has_xy(cls, point):
         try:
-            xy = point["color"]["xy"]
-            return isinstance(xy.get("x"), (int, float)) and isinstance(xy.get("y"), (int, float))
-        except (KeyError, TypeError, AttributeError):
+            return cls.is_xy(point["color"]["xy"])
+        except (KeyError, TypeError):
             return False
 
     @staticmethod

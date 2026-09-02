@@ -67,6 +67,21 @@ RGBCONTROLLER_SETCUSTOMMODE = 1100
 
 POLL_SECONDS = 3.0
 
+# Limits on what the server may send. The SDK server is normally local and
+# trusted, but the host and port are settings, so every size and count read
+# from the wire is checked before it drives an allocation or a loop. A
+# violation raises ProtocolError, which disconnects with the reason shown in
+# the panel. The caps are far above real hardware: the largest controllers
+# have a few thousand LEDs and blobs under 100 KB.
+MAX_PACKET_BYTES = 1 << 20
+MAX_CONTROLLERS = 64
+MAX_MODES = 128
+MAX_ZONES = 128
+MAX_LEDS = 8192
+MAX_MODE_COLORS = 256
+MAX_STRING_BYTES = 512
+MAX_NAME_CHARS = 128
+
 DEVICE_TYPES = [
     "Motherboard", "DRAM", "GPU", "Cooler", "LED Strip", "Keyboard",
     "Mouse", "Mouse Mat", "Headset", "Headset Stand", "Gamepad", "Light",
@@ -87,41 +102,44 @@ def result(op, ok, error=""):
     emit(msg)
 
 
+class ProtocolError(ConnectionError):
+    """The server sent something outside the protocol or the limits above."""
+
+
+def check(condition, what):
+    if not condition:
+        raise ProtocolError("server sent %s" % what)
+
+
 class Reader:
-    """Cursor over a controller-data blob."""
+    """Cursor over a controller-data blob. Every read is bounds-checked."""
 
     def __init__(self, data):
         self.data = data
         self.pos = 0
 
-    def u8(self):
-        v = self.data[self.pos]
-        self.pos += 1
-        return v
+    def take(self, n):
+        check(0 <= n <= len(self.data) - self.pos, "a truncated controller blob")
+        start = self.pos
+        self.pos += n
+        return self.data[start:self.pos]
 
     def u16(self):
-        v = struct.unpack_from("<H", self.data, self.pos)[0]
-        self.pos += 2
-        return v
+        return struct.unpack("<H", self.take(2))[0]
 
     def u32(self):
-        v = struct.unpack_from("<I", self.data, self.pos)[0]
-        self.pos += 4
-        return v
+        return struct.unpack("<I", self.take(4))[0]
 
     def i32(self):
-        v = struct.unpack_from("<i", self.data, self.pos)[0]
-        self.pos += 4
-        return v
+        return struct.unpack("<i", self.take(4))[0]
 
     def skip(self, n):
-        self.pos += n
+        self.take(n)
 
     def string(self):
         n = self.u16()
-        raw = self.data[self.pos:self.pos + n]
-        self.pos += n
-        return raw.rstrip(b"\x00").decode("utf-8", "replace")
+        check(n <= MAX_STRING_BYTES, "an oversized string")
+        return self.take(n).rstrip(b"\x00").decode("utf-8", "replace")[:MAX_NAME_CHARS]
 
 
 def hid_name(location):
@@ -168,7 +186,7 @@ def display_name(openrgb_name, location):
 
 def parse_controller(data, protocol):
     r = Reader(data)
-    r.u32()  # total size
+    check(r.u32() <= len(data), "a controller blob with a size past its data")
     dev = {"type": r.i32()}
     dev["name"] = r.string()
     if protocol >= 1:
@@ -178,6 +196,7 @@ def parse_controller(data, protocol):
     r.string()  # serial
     dev["name"] = display_name(dev["name"], r.string())  # location
     num_modes = r.u16()
+    check(num_modes <= MAX_MODES, "too many modes")
     active_mode = r.i32()
     modes = []
     for _ in range(num_modes):
@@ -195,9 +214,11 @@ def parse_controller(data, protocol):
         r.u32()  # direction
         r.u32()  # color mode
         n = r.u16()
+        check(n <= MAX_MODE_COLORS, "too many mode colors")
         r.skip(4 * n)  # mode colors
         modes.append(m)
     num_zones = r.u16()
+    check(num_zones <= MAX_ZONES, "too many zones")
     for _ in range(num_zones):
         r.string()  # zone name
         r.i32()  # zone type
@@ -206,10 +227,12 @@ def parse_controller(data, protocol):
         r.u32()  # leds count
         r.skip(r.u16())  # matrix map
     num_leds = r.u16()
+    check(num_leds <= MAX_LEDS, "too many LEDs")
     for _ in range(num_leds):
         r.string()  # led name
         r.u32()  # led value
     num_colors = r.u16()
+    check(num_colors <= MAX_LEDS, "too many colors")
     colors = []
     for _ in range(num_colors):
         raw = r.u32()
@@ -268,9 +291,9 @@ class Bridge:
 
     def recv_packet(self):
         header = self.recv_exact(16)
-        if header[:4] != b"ORGB":
-            raise ConnectionError("bad packet magic")
+        check(header[:4] == b"ORGB", "a packet without the ORGB magic")
         device_id, packet_id, size = struct.unpack("<III", header[4:])
+        check(size <= MAX_PACKET_BYTES, "a %d byte packet" % size)
         payload = self.recv_exact(size) if size else b""
         return device_id, packet_id, payload
 
@@ -300,6 +323,7 @@ class Bridge:
             self.sock.settimeout(10)
             _, payload = self.request(0, REQUEST_PROTOCOL_VERSION,
                                       struct.pack("<I", CLIENT_PROTOCOL))
+            check(len(payload) >= 4, "a short protocol version reply")
             server = struct.unpack("<I", payload[:4])[0]
             self.protocol = min(CLIENT_PROTOCOL, server)
             name = b"omarchy-rgb-sync\x00"
@@ -328,7 +352,9 @@ class Bridge:
             return
         try:
             _, payload = self.request(0, REQUEST_CONTROLLER_COUNT)
+            check(len(payload) >= 4, "a short controller count reply")
             count = struct.unpack("<I", payload[:4])[0]
+            check(count <= MAX_CONTROLLERS, "%d controllers" % count)
             devices = []
             for i in range(count):
                 _, blob = self.request(i, REQUEST_CONTROLLER_DATA,
