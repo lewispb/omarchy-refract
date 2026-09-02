@@ -40,6 +40,13 @@ Item {
   property string openrgbBinary: ""
   property bool serverStartAttempted: false
 
+  // Which devices the server reports, ignoring their colors. The gradient is
+  // re-applied when this changes: `openrgb --server` accepts clients before
+  // device detection finishes, so a connection made at login sees an empty
+  // list that fills in over the next few seconds, and devices plugged in
+  // later arrive the same way.
+  property string deviceSignature: ""
+
   readonly property string host: String(setting("host", "127.0.0.1") || "127.0.0.1")
   readonly property int port: Math.max(1, Math.min(65535, Number(setting("port", 6742)) || 6742))
   readonly property bool themeSync: setting("themeSync", true) !== false
@@ -115,20 +122,25 @@ Item {
       break
     case "result":
       if (msg.ok === false) lastError = String(msg.error || "OpenRGB rejected the command")
+      if (msg.op === "start_server") console.log("refract: " + (msg.started ? "started openrgb --server" : "did not start a server: " + msg.reason))
       break
     }
   }
 
   function applyState(msg) {
-    var wasConnected = connected
     if (msg.connected) {
       connected = true
       lastError = ""
       devices = Array.isArray(msg.devices) ? msg.devices : []
-      if (!wasConnected) scheduleApply()
+      var signature = devices.map(function(d) { return d.index + ":" + d.name + ":" + d.leds }).join("|")
+      if (signature !== deviceSignature) {
+        deviceSignature = signature
+        if (devices.length > 0) scheduleApply()
+      }
     } else {
       connected = false
       devices = []
+      deviceSignature = ""
       lastError = String(msg.error || "")
       maybeStartServer()
       reconnectTimer.restart()
@@ -139,13 +151,27 @@ Item {
     send({ op: "connect", host: host, port: port })
   }
 
-  // Once per shell session: spawning openrgb on every failed connect would
-  // fight a server the user is starting by hand or through systemd.
+  // At most once per shell session, and only when no openrgb process exists.
+  // A systemd unit and the shell start in the same second at login, and the
+  // server does not listen until it has finished detecting devices, so the
+  // first connect fails while a server is already starting. Two servers
+  // detect the same hardware at once and the second to bind the port exits;
+  // if that is the unit's process, systemd records a failure. The bridge
+  // checks the process table before spawning.
   function maybeStartServer() {
     if (!setting("autoStartServer", true)) return
     if (serverStartAttempted || openrgbBinary === "") return
     serverStartAttempted = true
-    Quickshell.execDetached([openrgbBinary, "--server"])
+    serverStartTimer.restart()
+  }
+
+  // The check runs a moment after the failed connect so a server that
+  // systemd is in the middle of starting or restarting is in the process
+  // table by the time the bridge looks.
+  Timer {
+    id: serverStartTimer
+    interval: 2000
+    onTriggered: root.send({ op: "start_server" })
   }
 
   Timer {
@@ -161,7 +187,8 @@ Item {
   }
 
   // Debounced: a theme switch rewrites colors.toml and the file watcher can
-  // fire more than once for it.
+  // fire more than once for it, and a starting server reports its devices
+  // one detector at a time.
   Timer {
     id: applyTimer
     interval: 600

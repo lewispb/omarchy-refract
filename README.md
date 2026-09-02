@@ -73,6 +73,12 @@ In the bar's widget settings (or `omarchy bar set io.github.lewispb.refract <key
   OpenRGB addresses the mouse's HID++ device directly.
 - **Devices without a per-LED mode** are set through their custom mode when
   the server offers one; a device with neither is left unchanged.
+- **Devices OpenRGB names after another vendor** are listed under the name the
+  kernel reports for them. OpenRGB names a device after the detector that
+  matched its USB ids, and some ids are shared: a Lofree Flow84 reports
+  Apple's `05AC:024F`, which the Keychron gaming keyboard detector claims, so
+  OpenRGB calls it "Keychron Gaming Keyboard 1". Refract shows it as the
+  kernel does, "Compx Flow84@Lofree".
 - **Philips Hue** needs a one-time bridge pairing in the OpenRGB GUI
   (Settings → Philips Hue Devices, then press the bridge's link button).
   After that the lights appear as devices like any other.

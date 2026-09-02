@@ -13,6 +13,7 @@ Commands:
    "exclude": ["device name", ...]}
   {"op": "apply_device", "device": 3, "anchors": [...], "style": "gradient"}
   {"op": "off", "device": 3}
+  {"op": "start_server"}
   {"op": "quit"}
 
 Events:
@@ -20,16 +21,21 @@ Events:
   {"event": "state", "connected": true, "host": ..., "port": ..., "protocol": N,
    "devices": [{"index", "name", "type", "leds", "activeMode", "colors"}]}
   {"event": "result", "op": ..., "ok": true|false, "error": ...}
+  {"event": "result", "op": "start_server", "ok": true, "started": true|false,
+   "reason": ...}
 
 Only the Python standard library is used.
 """
 
 import colorsys
 import json
+import os
+import re
 import select
 import shutil
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -105,6 +111,48 @@ class Reader:
         return raw.rstrip(b"\x00").decode("utf-8", "replace")
 
 
+def hid_name(location):
+    """The kernel's name for the device behind an OpenRGB HID location.
+
+    OpenRGB names a device after the detector that matched its USB ids, and
+    some vendors share ids: a Lofree Flow84 reports Apple's 05AC:024F, which
+    the Keychron gaming keyboard detector claims, so OpenRGB reports it as
+    "Keychron Gaming Keyboard 1". The kernel's HID name comes from the
+    device's own USB descriptor strings.
+    """
+    m = re.search(r"/dev/(hidraw\d+)", location or "")
+    if not m:
+        return ""
+    try:
+        with open("/sys/class/hidraw/%s/device/uevent" % m.group(1)) as f:
+            for line in f:
+                if line.startswith("HID_NAME="):
+                    return line[len("HID_NAME="):].strip()
+    except OSError:
+        pass
+    return ""
+
+
+def display_name(openrgb_name, location):
+    """OpenRGB's name, unless it shares no word with what the kernel reports.
+
+    A shared word ("Logitech", "Corsair", a model number) means the detector
+    matched the actual product and OpenRGB's tidier name is kept. No shared
+    word means the detector matched a USB id another vendor reuses, and the
+    kernel's name is the accurate one.
+    """
+    kernel = hid_name(location)
+    if not kernel:
+        return openrgb_name
+    words = lambda text: [w for w in re.findall(r"[A-Za-z0-9]+", text.lower()) if len(w) >= 3]
+    # A prefix counts as shared: "ASUS" against the kernel's "AsusTek".
+    for a in words(openrgb_name):
+        for b in words(kernel):
+            if a.startswith(b) or b.startswith(a):
+                return openrgb_name
+    return kernel
+
+
 def parse_controller(data, protocol):
     r = Reader(data)
     r.u32()  # total size
@@ -115,7 +163,7 @@ def parse_controller(data, protocol):
     r.string()  # description
     r.string()  # fw version
     r.string()  # serial
-    r.string()  # location
+    dev["name"] = display_name(dev["name"], r.string())  # location
     num_modes = r.u16()
     active_mode = r.i32()
     modes = []
@@ -192,6 +240,20 @@ def gradient(anchors, count):
         seg = min(int(pos), segs - 1)
         out.append(lerp_hex(anchors[seg], anchors[seg + 1], pos - seg))
     return out
+
+
+def openrgb_running():
+    """True if any process on this machine is the openrgb binary."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            with open("/proc/%s/comm" % pid) as f:
+                if f.read().strip() == "openrgb":
+                    return True
+        except OSError:
+            continue
+    return False
 
 
 class Bridge:
@@ -386,6 +448,34 @@ class Bridge:
             self.emit_state(error="lost connection: %s" % e)
             result("off", False, str(e))
 
+    # ---- Server start
+
+    def start_server(self):
+        """Spawn `openrgb --server` unless an openrgb process already exists.
+
+        The server accepts clients only after device detection finishes, so a
+        connect that fails right after login does not mean no server is
+        starting. A second server detects the same hardware at once and the
+        second to bind the port exits with a failure.
+        """
+        if openrgb_running():
+            emit({"event": "result", "op": "start_server", "ok": True,
+                  "started": False, "reason": "an openrgb process is already running"})
+            return
+        binary = shutil.which("openrgb")
+        if not binary:
+            emit({"event": "result", "op": "start_server", "ok": False,
+                  "started": False, "reason": "openrgb is not installed"})
+            return
+        try:
+            subprocess.Popen([binary, "--server"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+            emit({"event": "result", "op": "start_server", "ok": True, "started": True})
+        except OSError as e:
+            emit({"event": "result", "op": "start_server", "ok": False,
+                  "started": False, "reason": str(e)})
+
     # ---- Main loop
 
     def run(self):
@@ -426,6 +516,8 @@ class Bridge:
                     self.apply(msg)
                 elif op == "off":
                     self.off(int(msg.get("device", -1)))
+                elif op == "start_server":
+                    self.start_server()
                 elif op == "quit":
                     return
             now = time.monotonic()
