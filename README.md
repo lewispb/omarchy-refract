@@ -155,6 +155,19 @@ keep their last color. The pairing key stays in
 `~/.local/state/refract/hue.json`; delete the file, and remove the "refract"
 entry under Settings → Apps in the Hue app, to revoke it.
 
+## Development
+
+The bridge has a test suite with no dependency beyond the Python standard
+library. It covers the palette math, OpenRGB packet parsing and its limits,
+the Hue backend against a scripted bridge API, and an end-to-end run of the
+bridge process. No hardware, server, or network is involved.
+
+```bash
+python3 -m unittest discover -s bridge/tests -v
+```
+
+The same command runs in GitHub Actions on every push and pull request.
+
 ## Credits
 
 - [OmaRGB](https://github.com/ilkaydnc/omargb) by Ilkay Dinc set the
