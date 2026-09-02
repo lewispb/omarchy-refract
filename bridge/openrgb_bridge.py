@@ -1,33 +1,42 @@
 #!/usr/bin/env python3
-"""Bridge between the rgb-sync Quickshell plugin and an OpenRGB SDK server.
+"""Bridge between the Refract Quickshell plugin and the hardware backends.
 
 Reads JSON commands from stdin (one per line), writes JSON events to stdout
-(one per line). Talks the OpenRGB SDK binary protocol over TCP, so it can set
-one color per LED — which is what gradients need — and read device state back,
-so the plugin mirrors what the server reports rather than what was last sent.
+(one per line). Two backends sit behind one device list:
+
+- OpenRGB: the SDK binary protocol over TCP, so it can set one color per
+  LED — which is what gradients need — and read device state back, so the
+  plugin mirrors what the server reports rather than what was last sent.
+- Philips Hue (hue.py): the bridge's CLIP v2 API over HTTPS, on its own
+  thread. Hue devices carry string indexes prefixed "hue:".
 
 Commands:
   {"op": "connect", "host": "127.0.0.1", "port": 6742}
+  {"op": "hue", "enabled": true, "address": "", "room": ""}
   {"op": "refresh"}
   {"op": "apply", "anchors": ["RRGGBB", ...], "style": "gradient"|"solid",
-   "exclude": ["device name", ...]}
-  {"op": "apply_device", "device": 3, "anchors": [...], "style": "gradient"}
-  {"op": "off", "device": 3}
+   "vivid": true, "exclude": ["device name", ...],
+   "offsets": {"device name": N, ...}}
+  {"op": "apply", "device": 3 | "hue:<id>", "anchors": [...], "style": ...}
+  {"op": "off", "device": 3 | "hue:<id>"}
   {"op": "start_server"}
   {"op": "quit"}
 
 Events:
   {"event": "hello", "openrgbBinary": "/usr/bin/openrgb"}
   {"event": "state", "connected": true, "host": ..., "port": ..., "protocol": N,
-   "devices": [{"index", "name", "type", "leds", "activeMode", "colors"}]}
+   "hue": {"status": ..., "message": ..., "address": ..., "bridge": ...,
+           "room": ..., "rooms": [...]},
+   "devices": [{"index", "name", "type", "leds", "activeMode", "colors",
+                "detail"?}]}
   {"event": "result", "op": ..., "ok": true|false, "error": ...}
   {"event": "result", "op": "start_server", "ok": true, "started": true|false,
    "reason": ...}
 
-Only the Python standard library is used.
+`connected` describes the OpenRGB server; the Hue bridge reports through
+`hue.status`. Only the Python standard library is used.
 """
 
-import colorsys
 import json
 import os
 import re
@@ -37,7 +46,11 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
+
+from hue import INDEX_PREFIX as HUE_PREFIX, Hue
+from palette import spread, vivid
 
 # Cap the negotiated protocol at 3: the controller-data layout this file
 # parses stops at protocol 3 fields, and servers accept older clients.
@@ -208,38 +221,8 @@ def parse_controller(data, protocol):
     return dev
 
 
-# LEDs render mid-saturation screen colors as washed out, so hardware-bound
-# colors get their saturation and value lifted. Screen surfaces (the panel,
-# the bar) keep the exact theme colors.
-def vivid(hexc):
-    h, s, v = colorsys.rgb_to_hsv(int(hexc[0:2], 16) / 255,
-                                  int(hexc[2:4], 16) / 255,
-                                  int(hexc[4:6], 16) / 255)
-    r, g, b = colorsys.hsv_to_rgb(h, min(1.0, s * 1.45), min(1.0, v * 1.1))
-    return "%02X%02X%02X" % (round(r * 255), round(g * 255), round(b * 255))
-
-
-def lerp_hex(a, b, t):
-    def chan(i):
-        av = int(a[i:i + 2], 16)
-        bv = int(b[i:i + 2], 16)
-        return round(av + (bv - av) * t)
-    return "%02X%02X%02X" % (chan(0), chan(2), chan(4))
-
-
-def gradient(anchors, count):
-    """`count` colors interpolated through `anchors`, one per LED."""
-    if not anchors:
-        return []
-    if len(anchors) == 1 or count == 1:
-        return [anchors[0]] * count
-    segs = len(anchors) - 1
-    out = []
-    for i in range(count):
-        pos = i * segs / (count - 1)
-        seg = min(int(pos), segs - 1)
-        out.append(lerp_hex(anchors[seg], anchors[seg + 1], pos - seg))
-    return out
+def is_hue(index):
+    return isinstance(index, str) and index.startswith(HUE_PREFIX)
 
 
 def openrgb_running():
@@ -265,6 +248,8 @@ class Bridge:
         self.devices = []
         self.last_state_json = ""
         self.pending_list_update = False
+        self.hue_changed = threading.Event()
+        self.hue = Hue(notify=self.hue_changed.set)
 
     # ---- Socket protocol
 
@@ -323,7 +308,9 @@ class Bridge:
             return True
         except OSError as e:
             self.disconnect()
-            self.emit_state(error=str(e))
+            # Forced: the shell's reconnect timer runs from this event, and
+            # a repeat of the same error would otherwise be deduplicated.
+            self.emit_state(error=str(e), force=True)
             return False
 
     def disconnect(self):
@@ -372,13 +359,15 @@ class Bridge:
                 "activeMode": modes[active]["name"] if 0 <= active < len(modes) else "",
                 "colors": colors[::step][:12],
             })
+        hue_info, hue_devices = self.hue.snapshot()
         state = {
             "event": "state",
             "connected": self.sock is not None,
             "host": self.host,
             "port": self.port,
             "protocol": self.protocol,
-            "devices": devices,
+            "hue": hue_info,
+            "devices": devices + hue_devices,
         }
         if error:
             state["error"] = error
@@ -409,7 +398,13 @@ class Bridge:
         if msg.get("vivid", True):
             anchors = [vivid(a) for a in anchors]
         exclude = set(msg.get("exclude", []))
+        offsets = msg.get("offsets", {}) if isinstance(msg.get("offsets"), dict) else {}
         only = msg.get("device", None)
+        if only is None or is_hue(only):
+            self.hue.apply(anchors, only, exclude, offsets)
+        if is_hue(only):
+            result("apply", True)
+            return
         if not self.sock:
             result("apply", False, "not connected")
             return
@@ -421,11 +416,7 @@ class Bridge:
                     continue
                 if d["leds"] == 0:
                     continue
-                # A device with few LEDs gets the first two anchors rather
-                # than the whole palette: four diodes showing four hues reads
-                # as noise, not a gradient.
-                use = anchors if d["leds"] >= 10 else anchors[:2]
-                self.update_leds(d["index"], gradient(use, d["leds"]))
+                self.update_leds(d["index"], spread(anchors, d["leds"], offsets.get(d["name"], 0)))
             result("apply", True)
             self.refresh()
         except (OSError, ConnectionError) as e:
@@ -434,6 +425,10 @@ class Bridge:
             result("apply", False, str(e))
 
     def off(self, index):
+        if is_hue(index):
+            self.hue.off(index)
+            result("off", True)
+            return
         if not self.sock:
             result("off", False, "not connected")
             return
@@ -480,7 +475,9 @@ class Bridge:
 
     def run(self):
         emit({"event": "hello", "openrgbBinary": shutil.which("openrgb") or ""})
+        self.hue.start()
         last_poll = 0.0
+        inbuf = b""
         while True:
             rlist = [sys.stdin]
             if self.sock:
@@ -499,32 +496,51 @@ class Bridge:
                     self.disconnect()
                     self.emit_state(error="lost connection")
             if sys.stdin in ready:
-                line = sys.stdin.readline()
-                if line == "":
+                # Raw reads, not readline: two commands written together
+                # arrive in one chunk, and a line left in a buffered reader
+                # would wait for the next write before select reports it.
+                chunk = os.read(sys.stdin.fileno(), 65536)
+                if chunk == b"":
+                    self.hue.stop()
                     return
-                try:
-                    msg = json.loads(line)
-                except ValueError:
-                    continue
-                op = msg.get("op", "")
-                if op == "connect":
-                    self.connect(str(msg.get("host", "127.0.0.1")),
-                                 int(msg.get("port", 6742)))
-                elif op == "refresh":
-                    self.refresh(force=True)
-                elif op == "apply" or op == "apply_device":
-                    self.apply(msg)
-                elif op == "off":
-                    self.off(int(msg.get("device", -1)))
-                elif op == "start_server":
-                    self.start_server()
-                elif op == "quit":
-                    return
+                inbuf += chunk
+                while b"\n" in inbuf:
+                    line, inbuf = inbuf.split(b"\n", 1)
+                    self.handle_command(line)
             now = time.monotonic()
             if self.sock and (self.pending_list_update or now - last_poll >= POLL_SECONDS):
                 self.pending_list_update = False
                 last_poll = now
                 self.refresh()
+            if self.hue_changed.is_set():
+                self.hue_changed.clear()
+                self.emit_state()
+
+    def handle_command(self, line):
+        try:
+            msg = json.loads(line.decode("utf-8", "replace"))
+        except ValueError:
+            return
+        if not isinstance(msg, dict):
+            return
+        op = msg.get("op", "")
+        if op == "connect":
+            self.connect(str(msg.get("host", "127.0.0.1")), int(msg.get("port", 6742)))
+        elif op == "hue":
+            self.hue.configure(msg.get("enabled", True), msg.get("address", ""), msg.get("room", ""))
+        elif op == "refresh":
+            self.hue.refresh()
+            self.refresh(force=True)
+        elif op == "apply" or op == "apply_device":
+            self.apply(msg)
+        elif op == "off":
+            device = msg.get("device", -1)
+            self.off(device if is_hue(device) else int(device))
+        elif op == "start_server":
+            self.start_server()
+        elif op == "quit":
+            self.hue.stop()
+            raise SystemExit(0)
 
 
 if __name__ == "__main__":

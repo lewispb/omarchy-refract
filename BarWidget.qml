@@ -27,8 +27,8 @@ BarWidget {
 
   readonly property string tooltip: {
     if (!service) return "Refract"
-    if (!connected) return "OpenRGB unreachable — " + (service.lastError || "waiting for the server")
-    return service.deviceCount + " devices on the theme gradient — click for the panel"
+    if (!connected) return "No OpenRGB server or Hue bridge — " + (service.lastError || "waiting")
+    return service.deviceCount + (service.deviceCount === 1 ? " device" : " devices") + " on the theme gradient — click for the panel"
   }
 
   // The logo's mark at bar scale: eight dots on a ring, colored along the

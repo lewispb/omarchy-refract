@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Lewis Buckley",
   "license": "MIT",
-  "description": "Multi-color theme sync for RGB hardware. Builds a gradient from the active Omarchy theme's palette and spreads it across every LED of every device OpenRGB sees, with live state in the bar.",
+  "description": "Multi-color theme sync for RGB hardware and Philips Hue. Builds a gradient from the active Omarchy theme's palette and spreads it across every LED of every device OpenRGB sees and every color-capable Hue light, with live state in the bar.",
   "kinds": [
     "service",
     "bar-widget"
@@ -16,7 +16,7 @@
   },
   "barWidget": {
     "displayName": "Refract",
-    "description": "Theme-palette gradients across your RGB devices, per LED. Dots in the bar show the live gradient; the panel lists every device with its colors, and lets you re-apply, exclude, or switch devices off.",
+    "description": "Theme-palette gradients across your RGB devices and Philips Hue lights, per LED. Dots in the bar show the live gradient; the panel lists every device with its colors, and lets you re-apply, exclude, or switch devices off.",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -27,7 +27,10 @@
       "autoStartServer": true,
       "host": "127.0.0.1",
       "port": 6742,
-      "vivid": true
+      "vivid": true,
+      "hue": true,
+      "hueBridge": "",
+      "hueRoom": ""
     },
     "schema": [
       {
@@ -57,6 +60,27 @@
         "label": "Anchor colors",
         "description": "colors.toml keys the gradient passes through, in order. Keys a theme does not define are skipped.",
         "defaultValue": "accent magenta cyan blue"
+      },
+      {
+        "key": "hue",
+        "type": "boolean",
+        "label": "Sync Philips Hue lights",
+        "description": "Find the Hue bridge on the local network and set every color-capable light from the theme gradient. Pairing needs one press of the bridge's link button.",
+        "defaultValue": true
+      },
+      {
+        "key": "hueBridge",
+        "type": "string",
+        "label": "Hue bridge address",
+        "description": "IP address or hostname of the Hue bridge. Leave blank to discover it.",
+        "defaultValue": ""
+      },
+      {
+        "key": "hueRoom",
+        "type": "string",
+        "label": "Hue room or zone",
+        "description": "Sync only the lights in this room or zone, by the name shown in the Hue app. Leave blank for every color-capable light.",
+        "defaultValue": ""
       },
       {
         "key": "autoStartServer",

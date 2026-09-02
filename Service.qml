@@ -8,10 +8,11 @@ import "Model.js" as Model
 // creates one of these per plugin; bar surfaces read it through
 // `bar.shell.serviceFor(id)` instead of spawning their own bridge.
 //
-// Talks to OpenRGB through bridge/openrgb_bridge.py: JSON commands in on
-// stdin, JSON events out on stdout. The bridge speaks the SDK binary
-// protocol, sets one color per LED, and polls for changes made by other
-// clients, so `devices` mirrors what the server reports.
+// Talks to the hardware through bridge/openrgb_bridge.py: JSON commands in
+// on stdin, JSON events out on stdout. The bridge speaks the OpenRGB SDK
+// binary protocol and the Philips Hue bridge's HTTPS API, sets one color per
+// LED, and polls for changes made by other clients, so `devices` mirrors
+// what the server and the bridge report.
 //
 // The theme watcher reads the active theme's colors.toml. When it changes —
 // which is what `omarchy theme set` causes — the gradient is rebuilt from the
@@ -34,7 +35,15 @@ Item {
 
   // ---- State read by the widget and panel
   property bool bridgeReady: false
-  property bool connected: false
+  property bool openrgbConnected: false
+  // disabled, searching, unpaired, connected, or unreachable; see hue.py.
+  property string hueStatus: "disabled"
+  property string hueMessage: ""
+  // Room and zone names the bridge reports, for the panel's room picker.
+  property var hueRooms: []
+  readonly property bool hueConnected: hueStatus === "connected"
+  // Something is there to receive colors.
+  readonly property bool connected: openrgbConnected || hueConnected
   property var devices: []
   property string lastError: ""
   property string openrgbBinary: ""
@@ -53,10 +62,19 @@ Item {
   readonly property string style: String(setting("style", "gradient")) === "solid" ? "solid" : "gradient"
   readonly property string anchorKeys: String(setting("anchors", "accent magenta cyan blue"))
   readonly property bool vivid: setting("vivid", true) !== false
+  readonly property bool hueEnabled: setting("hue", true) !== false
+  readonly property string hueBridge: String(setting("hueBridge", "") || "")
+  // A Hue room or zone name; blank syncs every color-capable light.
+  readonly property string hueRoom: String(setting("hueRoom", "") || "")
 
   // Devices switched off from the panel, by name: { "<device name>": true }.
   // The panel owns writing this; theme sync leaves these dark.
   readonly property var offDevices: setting("off", ({})) || ({})
+
+  // Which theme color each device's gradient starts from, by name:
+  // { "<device name>": N }. Clicking a row's swatches in the panel advances
+  // it; a one-LED lamp steps through the anchors one at a time.
+  readonly property var offsets: setting("offsets", ({})) || ({})
 
   readonly property int deviceCount: devices.length
 
@@ -116,6 +134,7 @@ Item {
       bridgeReady = true
       openrgbBinary = msg.openrgbBinary ? String(msg.openrgbBinary) : ""
       connectNow()
+      configureHue()
       break
     case "state":
       applyState(msg)
@@ -128,28 +147,40 @@ Item {
   }
 
   function applyState(msg) {
-    if (msg.connected) {
-      connected = true
+    openrgbConnected = msg.connected === true
+    hueStatus = msg.hue && msg.hue.status ? String(msg.hue.status) : "disabled"
+    hueMessage = msg.hue && msg.hue.message ? String(msg.hue.message) : ""
+    hueRooms = msg.hue && Array.isArray(msg.hue.rooms) ? msg.hue.rooms : []
+    // The bridge lists OpenRGB devices only while connected, so the list
+    // holds Hue lights alone when the server is down.
+    devices = Array.isArray(msg.devices) ? msg.devices : []
+    var signature = devices.map(function(d) { return d.index + ":" + d.name + ":" + d.leds }).join("|")
+    if (signature !== deviceSignature) {
+      deviceSignature = signature
+      if (devices.length > 0) scheduleApply()
+    }
+    if (openrgbConnected) {
       lastError = ""
-      devices = Array.isArray(msg.devices) ? msg.devices : []
-      var signature = devices.map(function(d) { return d.index + ":" + d.name + ":" + d.leds }).join("|")
-      if (signature !== deviceSignature) {
-        deviceSignature = signature
-        if (devices.length > 0) scheduleApply()
-      }
     } else {
-      connected = false
-      devices = []
-      deviceSignature = ""
       lastError = String(msg.error || "")
       maybeStartServer()
-      reconnectTimer.restart()
+      // Not restarted: Hue state changes arrive as state events too, and
+      // each one would push the next OpenRGB attempt further out.
+      if (!reconnectTimer.running) reconnectTimer.start()
     }
   }
 
   function connectNow() {
     send({ op: "connect", host: host, port: port })
   }
+
+  function configureHue() {
+    send({ op: "hue", enabled: hueEnabled, address: hueBridge, room: hueRoom })
+  }
+
+  onHueEnabledChanged: configureHue()
+  onHueBridgeChanged: configureHue()
+  onHueRoomChanged: configureHue()
 
   // At most once per shell session, and only when no openrgb process exists.
   // A systemd unit and the shell start in the same second at login, and the
@@ -204,12 +235,12 @@ Item {
     if (!connected || themeAnchors.length === 0) return
     var exclude = []
     for (var name in offDevices) if (offDevices[name]) exclude.push(name)
-    send({ op: "apply", anchors: themeAnchors, style: style, vivid: vivid, exclude: exclude })
+    send({ op: "apply", anchors: themeAnchors, style: style, vivid: vivid, exclude: exclude, offsets: offsets })
   }
 
   function applyDevice(index) {
     if (!connected || themeAnchors.length === 0) return
-    send({ op: "apply", anchors: themeAnchors, style: style, vivid: vivid, device: index })
+    send({ op: "apply", anchors: themeAnchors, style: style, vivid: vivid, device: index, offsets: offsets })
   }
 
   function deviceOff(index) {
@@ -235,8 +266,12 @@ Item {
 
     onExited: {
       root.bridgeReady = false
-      root.connected = false
+      root.openrgbConnected = false
+      root.hueStatus = "disabled"
+      root.hueMessage = ""
+      root.hueRooms = []
       root.devices = []
+      root.deviceSignature = ""
       restartTimer.restart()
     }
   }
